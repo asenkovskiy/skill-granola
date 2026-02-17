@@ -23,7 +23,7 @@ A [Claude Code](https://claude.ai/code) skill that syncs and queries [Granola](h
 ### Personal (all projects)
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/skill-granola.git ~/.claude/skills/granola
+git clone https://github.com/asenkovskiy/skill-granola.git ~/.claude/skills/granola
 cd ~/.claude/skills/granola
 uv venv && uv pip install -r requirements.txt
 ```
@@ -32,7 +32,7 @@ uv venv && uv pip install -r requirements.txt
 
 ```bash
 mkdir -p .claude/skills
-git clone https://github.com/YOUR-USERNAME/skill-granola.git .claude/skills/granola
+git clone https://github.com/asenkovskiy/skill-granola.git .claude/skills/granola
 cd .claude/skills/granola
 uv venv && uv pip install -r requirements.txt
 ```
