@@ -105,14 +105,14 @@ See [docs/qmd-integration.md](docs/qmd-integration.md) for setup instructions.
 
 ## How Auth Works
 
-The skill reads authentication tokens from `~/Library/Application Support/Granola/supabase.json`, which the Granola desktop app creates when you sign in. Tokens expire after ~6 hours — just open Granola to refresh them. No API keys or manual token management needed.
+The skill reads authentication tokens from `~/Library/Application Support/Granola/supabase.json`, which the Granola desktop app creates when you sign in. If a token is expired, the skill automatically attempts to refresh it using the stored refresh token. As a fallback, it also tries `stored-accounts.json`. No API keys or manual token management needed — just keep the Granola desktop app installed.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
 | "Auth file not found" | Sign into the Granola desktop app |
-| "Token may be expired" | Open Granola to refresh (tokens last ~6 hours) |
+| "Token expired and refresh failed" | Open Granola to re-authenticate |
 | "requests module not found" | Run `uv pip install requests` in the skill's venv |
 | Empty search results | Run `sync` first to download meetings |
 
