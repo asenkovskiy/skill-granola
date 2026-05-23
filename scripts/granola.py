@@ -45,6 +45,8 @@ except ImportError:
 
 # Constants
 SUPABASE_PATH = Path.home() / "Library/Application Support/Granola/supabase.json"
+STORED_ACCOUNTS_PATH = Path.home() / "Library/Application Support/Granola/stored-accounts.json"
+AUTH_BASE = "https://auth.granola.ai/user_management"
 API_BASE = "https://api.granola.ai/v1"
 DEFAULT_STORAGE = Path.home() / "Documents/granola-meetings"
 
@@ -78,13 +80,51 @@ def get_storage_path(override: str | None = None) -> Path:
 # Authentication
 # ============================================================================
 
-def get_token() -> str:
-    """Get access token from Granola's local auth file.
+def _try_refresh_token(refresh_token: str, client_id: str) -> str | None:
+    """Attempt to get a new access token using a refresh token. Returns new access token or None."""
+    try:
+        resp = requests.post(
+            f"{AUTH_BASE}/authenticate",
+            json={"grant_type": "refresh_token", "client_id": client_id, "refresh_token": refresh_token},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        new_tokens = resp.json()
+        new_access_token = new_tokens.get("access_token")
+        if not new_access_token:
+            return None
 
-    Reads from ~/Library/Application Support/Granola/supabase.json,
-    which the Granola desktop app creates on sign-in.
-    Warns on stderr if the token looks expired.
-    """
+        # Write the refreshed token back to supabase.json
+        with open(SUPABASE_PATH) as f:
+            data = json.load(f)
+        workos = json.loads(data.get("workos_tokens", "{}"))
+        workos["access_token"] = new_access_token
+        if new_tokens.get("refresh_token"):
+            workos["refresh_token"] = new_tokens["refresh_token"]
+        workos["obtained_at"] = int(datetime.now().timestamp() * 1000)
+        data["workos_tokens"] = json.dumps(workos)
+        with open(SUPABASE_PATH, "w") as f:
+            json.dump(data, f)
+
+        return new_access_token
+    except Exception:
+        return None
+
+
+def _get_client_id_from_token(access_token: str) -> str | None:
+    """Extract WorkOS client_id from the JWT issuer claim."""
+    try:
+        import base64
+        payload = access_token.split(".")[1]
+        decoded = json.loads(base64.b64decode(payload + "=="))
+        iss = decoded.get("iss", "")
+        return iss.split("/")[-1] if iss else None
+    except Exception:
+        return None
+
+
+def get_token() -> str:
+    """Get a valid access token, auto-refreshing if expired."""
     if not SUPABASE_PATH.exists():
         print(json.dumps({
             "error": "Auth file not found",
@@ -106,12 +146,40 @@ def get_token() -> str:
         }), file=sys.stderr)
         sys.exit(1)
 
-    # Check expiration
+    # Check if expired
     obtained_at = tokens.get("obtained_at", 0) / 1000
     expires_in = tokens.get("expires_in", 0)
-    if datetime.now().timestamp() > obtained_at + expires_in:
-        print(json.dumps({"warning": "Token may be expired. Open Granola to refresh."}), file=sys.stderr)
+    is_expired = datetime.now().timestamp() > obtained_at + expires_in
 
+    if not is_expired:
+        return token
+
+    # Try to refresh using supabase.json refresh_token first
+    refresh = tokens.get("refresh_token")
+    client_id = _get_client_id_from_token(token)
+
+    if refresh and client_id:
+        new_token = _try_refresh_token(refresh, client_id)
+        if new_token:
+            return new_token
+
+    # Fall back to stored-accounts.json refresh token
+    if STORED_ACCOUNTS_PATH.exists():
+        try:
+            with open(STORED_ACCOUNTS_PATH) as f:
+                sa_data = json.load(f)
+            accounts = json.loads(sa_data.get("accounts", "[]"))
+            if accounts:
+                sa_tokens = json.loads(accounts[0].get("tokens", "{}"))
+                sa_refresh = sa_tokens.get("refresh_token")
+                if sa_refresh and client_id:
+                    new_token = _try_refresh_token(sa_refresh, client_id)
+                    if new_token:
+                        return new_token
+        except Exception:
+            pass
+
+    print(json.dumps({"warning": "Token expired and refresh failed. Open Granola to re-authenticate."}), file=sys.stderr)
     return token
 
 
@@ -126,7 +194,12 @@ def api_request(endpoint: str, payload: dict | None = None, token: str | None = 
 
     response = requests.post(
         f"{API_BASE}/{endpoint}",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "X-Client-Version": "7.220.0",
+            "X-Granola-Platform": "macOS",
+        },
         json=payload or {},
     )
     response.raise_for_status()

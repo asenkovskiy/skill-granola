@@ -48,10 +48,20 @@ See the [README](README.md) for full installation instructions.
 ## Available Commands
 
 ### Sync Meetings
+
+**Default approach:** Check what's already synced, then fetch only what's new:
 ```bash
-granola.py sync                        # Incremental sync (skips unchanged)
+# 1. Get the date of the most recent synced meeting
+granola.py list --compact --json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['date'] if d else '')"
+
+# 2. Sync from that date onward
+granola.py sync --since <last-synced-date> --json
+```
+
+Other sync modes:
+```bash
+granola.py sync                        # Full incremental sync (skips unchanged, but queries all)
 granola.py sync --force                # Re-download all
-granola.py sync --since today --json   # Sync only recent meetings
 granola.py sync --quiet                # Quiet mode for cron
 ```
 
