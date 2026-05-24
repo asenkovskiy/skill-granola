@@ -627,7 +627,11 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
     if args.json:
         print(json.dumps(result, indent=2 if args.pretty else None))
-    elif not args.quiet:
+    elif args.quiet:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if synced > 0:
+            print(f"{ts} synced={synced} skipped={skipped}", file=sys.stderr)
+    else:
         print(f"\nDone! Synced {synced}, skipped {skipped} (unchanged).", file=sys.stderr)
 
 
@@ -802,7 +806,14 @@ def main() -> None:
     search_p.set_defaults(func=cmd_search)
 
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except Exception as e:
+        import traceback
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        print(f"{ts} ERROR: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
