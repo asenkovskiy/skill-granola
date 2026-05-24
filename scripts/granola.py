@@ -19,6 +19,7 @@ from __future__ import annotations
 __version__ = "1.0.0"
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -114,7 +115,6 @@ def _try_refresh_token(refresh_token: str, client_id: str) -> str | None:
 def _get_client_id_from_token(access_token: str) -> str | None:
     """Extract WorkOS client_id from the JWT issuer claim."""
     try:
-        import base64
         payload = access_token.split(".")[1]
         decoded = json.loads(base64.b64decode(payload + "=="))
         iss = decoded.get("iss", "")
@@ -154,16 +154,12 @@ def get_token() -> str:
     if not is_expired:
         return token
 
-    # Try to refresh using supabase.json refresh_token first
-    refresh = tokens.get("refresh_token")
     client_id = _get_client_id_from_token(token)
 
-    if refresh and client_id:
-        new_token = _try_refresh_token(refresh, client_id)
-        if new_token:
-            return new_token
-
-    # Fall back to stored-accounts.json refresh token
+    # Collect candidate refresh tokens: supabase.json first, stored-accounts.json second
+    candidates = []
+    if tokens.get("refresh_token"):
+        candidates.append(tokens["refresh_token"])
     if STORED_ACCOUNTS_PATH.exists():
         try:
             with open(STORED_ACCOUNTS_PATH) as f:
@@ -171,13 +167,16 @@ def get_token() -> str:
             accounts = json.loads(sa_data.get("accounts", "[]"))
             if accounts:
                 sa_tokens = json.loads(accounts[0].get("tokens", "{}"))
-                sa_refresh = sa_tokens.get("refresh_token")
-                if sa_refresh and client_id:
-                    new_token = _try_refresh_token(sa_refresh, client_id)
-                    if new_token:
-                        return new_token
+                if sa_tokens.get("refresh_token"):
+                    candidates.append(sa_tokens["refresh_token"])
         except Exception:
             pass
+
+    if client_id:
+        for refresh in candidates:
+            new_token = _try_refresh_token(refresh, client_id)
+            if new_token:
+                return new_token
 
     print(json.dumps({"warning": "Token expired and refresh failed. Open Granola to re-authenticate."}), file=sys.stderr)
     return token
@@ -223,42 +222,30 @@ def fetch_transcript(token: str, doc_id: str) -> list[dict]:
 # People Helpers
 # ============================================================================
 
-def extract_people(people_data: dict | list | None) -> tuple[str, list[str]]:
-    """Extract creator name and all participant identifiers from a meeting's people field.
+def _iter_people(people_data: dict | list) -> list[dict]:
+    """Flatten people_data into a list of person dicts with optional name/email keys.
 
-    Returns (creator_name, [all identifiers]) where identifiers are names or emails.
     Handles both dict format (creator + attendees) and list format from the API.
+    The first entry is always the creator when the dict format is used.
     """
-    if not people_data:
-        return "Me", []
-
-    creator_name = "Me"
-    identifiers: list[str] = []
-
+    entries: list[dict] = []
     if isinstance(people_data, dict):
-        creator = people_data.get("creator") or {}
-        if creator.get("name"):
-            creator_name = creator["name"]
-        # Collect all identifiers (name and email) for the creator
-        for field in ("name", "email"):
-            if creator.get(field):
-                identifiers.append(creator[field])
-
+        entries.append(people_data.get("creator") or {})
         for att in people_data.get("attendees") or []:
-            if isinstance(att, dict):
-                for field in ("name", "email"):
-                    if att.get(field):
-                        identifiers.append(att[field])
-            elif isinstance(att, str):
-                identifiers.append(att)
-
+            entries.append({"name": att} if isinstance(att, str) else att)
     elif isinstance(people_data, list):
         for p in people_data:
-            if isinstance(p, dict):
-                for field in ("name", "email"):
-                    if p.get(field):
-                        identifiers.append(p[field])
+            entries.append({"name": p} if isinstance(p, str) else p)
+    return entries
 
+
+def extract_people(people_data: dict | list | None) -> tuple[str, list[str]]:
+    """Extract creator name and all participant identifiers (names + emails)."""
+    if not people_data:
+        return "Me", []
+    entries = _iter_people(people_data)
+    creator_name = (entries[0].get("name") or "Me") if entries else "Me"
+    identifiers = [v for p in entries for f in ("name", "email") if (v := p.get(f))]
     return creator_name, identifiers
 
 
@@ -266,21 +253,7 @@ def get_attendee_names(people_data: dict | list | None) -> list[str]:
     """Get display names for all meeting participants (for transcript headers)."""
     if not people_data:
         return []
-
-    names: list[str] = []
-    if isinstance(people_data, dict):
-        creator = people_data.get("creator") or {}
-        if creator.get("name"):
-            names.append(creator["name"])
-        for att in people_data.get("attendees") or []:
-            if isinstance(att, dict) and att.get("name"):
-                names.append(att["name"])
-            elif isinstance(att, str):
-                names.append(att)
-    elif isinstance(people_data, list):
-        names = [p.get("name", p.get("email", "Unknown")) for p in people_data if isinstance(p, dict)]
-
-    return names
+    return [p.get("name") or p.get("email") or "Unknown" for p in _iter_people(people_data) if p]
 
 
 def matches_participant(people_data: dict | list | None, query: str) -> bool:
@@ -491,17 +464,6 @@ def find_meeting_dir(storage_path: Path, meeting_id: str) -> Path | None:
         metadata = load_meeting_metadata(item)
         if metadata and metadata.get("id", "").startswith(meeting_id):
             return item
-
-        # Fallback: check document.json
-        doc_file = item / "document.json"
-        if doc_file.exists():
-            try:
-                with open(doc_file) as f:
-                    doc = json.load(f)
-                if doc.get("id", "").startswith(meeting_id):
-                    return item
-            except (json.JSONDecodeError, IOError):
-                pass
 
     return None
 
