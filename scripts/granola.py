@@ -119,7 +119,7 @@ def _read_encrypted_auth() -> dict:
     return json.loads(plaintext.decode("utf-8"))
 
 
-def _try_refresh_token(refresh_token: str, client_id: str) -> str | None:
+def _try_refresh_token(refresh_token: str, client_id: str, using_encrypted: bool = False) -> str | None:
     """Attempt to get a new access token using a refresh token. Returns new access token or None."""
     try:
         resp = requests.post(
@@ -136,8 +136,9 @@ def _try_refresh_token(refresh_token: str, client_id: str) -> str | None:
     if not new_access_token:
         return None
 
-    # Write back to plaintext supabase.json if present (best-effort cache)
-    if SUPABASE_PATH.exists():
+    # Write back to plaintext supabase.json only when not in encrypted mode —
+    # freshening a stale plaintext file with live credentials would bypass encrypted storage.
+    if not using_encrypted and SUPABASE_PATH.exists():
         try:
             with open(SUPABASE_PATH) as f:
                 file_data = json.load(f)
@@ -170,20 +171,22 @@ def get_token() -> str:
     """Get a valid access token, auto-refreshing if expired."""
     # Try encrypted storage first (Granola 7.x+), fall back to plaintext
     data = None
-    using_encrypted = SUPABASE_ENC_PATH.exists() and DEK_PATH.exists()
-    if using_encrypted:
+    enc_error = None
+    using_encrypted = False
+    if SUPABASE_ENC_PATH.exists() and DEK_PATH.exists():
         try:
             data = _read_encrypted_auth()
-        except Exception:
-            pass
+            using_encrypted = True
+        except Exception as e:
+            enc_error = e
 
     if data is None:
         if not SUPABASE_PATH.exists():
-            print(json.dumps({
-                "error": "Auth file not found",
-                "path": str(SUPABASE_PATH),
-                "hint": "Make sure Granola (https://granola.ai) is installed and you're signed in."
-            }), file=sys.stderr)
+            hint = "Make sure Granola (https://granola.ai) is installed and you're signed in."
+            err: dict = {"error": "Auth file not found", "path": str(SUPABASE_PATH), "hint": hint}
+            if enc_error:
+                err["encrypted_auth_error"] = str(enc_error)
+            print(json.dumps(err), file=sys.stderr)
             sys.exit(1)
         with open(SUPABASE_PATH) as f:
             data = json.load(f)
@@ -226,7 +229,7 @@ def get_token() -> str:
 
     if client_id:
         for refresh in candidates:
-            new_token = _try_refresh_token(refresh, client_id)
+            new_token = _try_refresh_token(refresh, client_id, using_encrypted=using_encrypted)
             if new_token:
                 return new_token
 
