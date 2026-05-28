@@ -16,14 +16,16 @@ Commands:
 
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -45,8 +47,11 @@ except ImportError:
     sys.exit(1)
 
 # Constants
-SUPABASE_PATH = Path.home() / "Library/Application Support/Granola/supabase.json"
-STORED_ACCOUNTS_PATH = Path.home() / "Library/Application Support/Granola/stored-accounts.json"
+GRANOLA_DIR = Path.home() / "Library/Application Support/Granola"
+SUPABASE_PATH = GRANOLA_DIR / "supabase.json"
+SUPABASE_ENC_PATH = GRANOLA_DIR / "supabase.json.enc"
+DEK_PATH = GRANOLA_DIR / "storage.dek"
+STORED_ACCOUNTS_PATH = GRANOLA_DIR / "stored-accounts.json"
 AUTH_BASE = "https://auth.granola.ai/user_management"
 API_BASE = "https://api.granola.ai/v1"
 DEFAULT_STORAGE = Path.home() / "Documents/granola-meetings"
@@ -81,6 +86,39 @@ def get_storage_path(override: str | None = None) -> Path:
 # Authentication
 # ============================================================================
 
+def _read_encrypted_auth() -> dict:
+    """Read Granola auth from encrypted storage (Granola 7.x+, uses Electron safeStorage)."""
+    try:
+        from Crypto.Cipher import AES
+        from Crypto.Util.Padding import unpad
+    except ImportError:
+        raise RuntimeError(
+            "pycryptodome required for encrypted storage. "
+            "Run: uv pip install pycryptodome"
+        )
+
+    result = subprocess.run(
+        ["security", "find-generic-password", "-s", "Granola Safe Storage", "-a", "Granola Key", "-w"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Granola Safe Storage key not found in Keychain")
+    raw_key = result.stdout.strip().encode()
+
+    # Derive AES-128 key via PBKDF2-SHA1 (Chromium OSCrypt / Electron safeStorage on macOS)
+    dk = hashlib.pbkdf2_hmac("sha1", raw_key, b"saltysalt", 1003, dklen=16)
+
+    # Decrypt DEK: strip v10 prefix, AES-128-CBC, IV = 16 space bytes
+    dek_enc = DEK_PATH.read_bytes()
+    dek = base64.b64decode(unpad(AES.new(dk, AES.MODE_CBC, b" " * 16).decrypt(dek_enc[3:]), 16))
+
+    # Decrypt auth file: AES-256-GCM, IV = first 12 bytes, tag = last 16 bytes
+    data = SUPABASE_ENC_PATH.read_bytes()
+    iv, tag, ct = data[:12], data[-16:], data[12:-16]
+    plaintext = AES.new(dek, AES.MODE_GCM, nonce=iv).decrypt_and_verify(ct, tag)
+    return json.loads(plaintext.decode("utf-8"))
+
+
 def _try_refresh_token(refresh_token: str, client_id: str) -> str | None:
     """Attempt to get a new access token using a refresh token. Returns new access token or None."""
     try:
@@ -92,24 +130,29 @@ def _try_refresh_token(refresh_token: str, client_id: str) -> str | None:
         resp.raise_for_status()
         new_tokens = resp.json()
         new_access_token = new_tokens.get("access_token")
-        if not new_access_token:
-            return None
-
-        # Write the refreshed token back to supabase.json
-        with open(SUPABASE_PATH) as f:
-            data = json.load(f)
-        workos = json.loads(data.get("workos_tokens", "{}"))
-        workos["access_token"] = new_access_token
-        if new_tokens.get("refresh_token"):
-            workos["refresh_token"] = new_tokens["refresh_token"]
-        workos["obtained_at"] = int(datetime.now().timestamp() * 1000)
-        data["workos_tokens"] = json.dumps(workos)
-        with open(SUPABASE_PATH, "w") as f:
-            json.dump(data, f)
-
-        return new_access_token
     except Exception:
         return None
+
+    if not new_access_token:
+        return None
+
+    # Write back to plaintext supabase.json if present (best-effort cache)
+    if SUPABASE_PATH.exists():
+        try:
+            with open(SUPABASE_PATH) as f:
+                file_data = json.load(f)
+            workos = json.loads(file_data.get("workos_tokens", "{}"))
+            workos["access_token"] = new_access_token
+            if new_tokens.get("refresh_token"):
+                workos["refresh_token"] = new_tokens["refresh_token"]
+            workos["obtained_at"] = int(datetime.now().timestamp() * 1000)
+            file_data["workos_tokens"] = json.dumps(workos)
+            with open(SUPABASE_PATH, "w") as f:
+                json.dump(file_data, f)
+        except Exception:
+            pass
+
+    return new_access_token
 
 
 def _get_client_id_from_token(access_token: str) -> str | None:
@@ -125,16 +168,25 @@ def _get_client_id_from_token(access_token: str) -> str | None:
 
 def get_token() -> str:
     """Get a valid access token, auto-refreshing if expired."""
-    if not SUPABASE_PATH.exists():
-        print(json.dumps({
-            "error": "Auth file not found",
-            "path": str(SUPABASE_PATH),
-            "hint": "Make sure Granola (https://granola.ai) is installed and you're signed in."
-        }), file=sys.stderr)
-        sys.exit(1)
+    # Try encrypted storage first (Granola 7.x+), fall back to plaintext
+    data = None
+    using_encrypted = SUPABASE_ENC_PATH.exists() and DEK_PATH.exists()
+    if using_encrypted:
+        try:
+            data = _read_encrypted_auth()
+        except Exception:
+            pass
 
-    with open(SUPABASE_PATH) as f:
-        data = json.load(f)
+    if data is None:
+        if not SUPABASE_PATH.exists():
+            print(json.dumps({
+                "error": "Auth file not found",
+                "path": str(SUPABASE_PATH),
+                "hint": "Make sure Granola (https://granola.ai) is installed and you're signed in."
+            }), file=sys.stderr)
+            sys.exit(1)
+        with open(SUPABASE_PATH) as f:
+            data = json.load(f)
 
     tokens = json.loads(data.get("workos_tokens", "{}"))
     token = tokens.get("access_token")
@@ -156,11 +208,11 @@ def get_token() -> str:
 
     client_id = _get_client_id_from_token(token)
 
-    # Collect candidate refresh tokens: supabase.json first, stored-accounts.json second
+    # Collect candidate refresh tokens
     candidates = []
     if tokens.get("refresh_token"):
         candidates.append(tokens["refresh_token"])
-    if STORED_ACCOUNTS_PATH.exists():
+    if not using_encrypted and STORED_ACCOUNTS_PATH.exists():
         try:
             with open(STORED_ACCOUNTS_PATH) as f:
                 sa_data = json.load(f)
@@ -442,7 +494,7 @@ def load_meeting_metadata(meeting_dir: Path) -> dict | None:
 def find_meeting_dir(storage_path: Path, meeting_id: str) -> Path | None:
     """Find a meeting directory by ID. Supports partial ID matching.
 
-    Search order: direct path match → folder name contains ID → metadata.json → document.json.
+    Search order: direct path match → folder name contains ID → metadata.json.
     """
     if not storage_path.exists():
         return None
