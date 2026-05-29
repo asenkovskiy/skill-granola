@@ -826,10 +826,12 @@ def main() -> None:
     try:
         args.func(args)
     except Exception as e:
-        import traceback
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        is_auth_error = hasattr(e, "response") and getattr(e.response, "status_code", None) == 401
         print(f"{ts} ERROR: {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
+        if not is_auth_error:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
         sys.exit(1)
 
 
