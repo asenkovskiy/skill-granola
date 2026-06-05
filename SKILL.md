@@ -62,8 +62,41 @@ Other sync modes:
 ```bash
 granola.py sync                        # Full incremental sync (skips unchanged, but queries all)
 granola.py sync --force                # Re-download all
-granola.py sync --quiet                # Quiet mode for cron
+granola.py sync --quiet                # Quiet mode for scheduled/automated syncs
 ```
+
+### Scheduling automatic syncs (macOS)
+
+To keep meetings synced in the background, install a **launchd LaunchAgent**. On
+macOS this is the scheduler that works for this skill: it runs inside your login
+session, so it can reach the Keychain that Granola uses to encrypt its local
+credentials. (Plain `cron` runs without that session and can't decrypt them, so
+scheduled cron syncs fail to authenticate — use launchd instead.)
+
+The CLI installs and loads the agent for you:
+
+```bash
+granola.py install-launchagent          # write, load, and run one sync now
+```
+
+This syncs on login and every 3 hours, logging to
+`~/Library/Logs/granola-sync.log`. launchd runs any sync missed during
+sleep/logout once on wake. The agent only runs while you're **logged in** —
+that's what gives it Keychain access.
+
+Options:
+
+```bash
+granola.py install-launchagent --interval 3600   # custom interval (seconds)
+granola.py install-launchagent --log /path/to.log
+granola.py install-launchagent --storage /path   # sync to a non-default folder
+granola.py install-launchagent --no-run          # load but don't sync immediately
+granola.py install-launchagent --uninstall       # unload and remove the agent
+```
+
+> **Manual loading:** to inspect or load the agent yourself, run
+> `granola.py install-launchagent --no-load` to just write the plist to
+> `~/Library/LaunchAgents/`, then `launchctl bootstrap gui/$(id -u) <plist>`.
 
 ### List/Filter Meetings
 ```bash

@@ -16,13 +16,14 @@ Commands:
 
 from __future__ import annotations
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import argparse
 import base64
 import hashlib
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -772,6 +773,129 @@ def cmd_search(args: argparse.Namespace) -> None:
     print(json.dumps(results, indent=2 if args.pretty else None))
 
 
+def cmd_install_launchagent(args: argparse.Namespace) -> None:
+    """Install (or remove) a launchd LaunchAgent that syncs on login and on an interval.
+
+    launchd runs in your login session, so it can reach the Keychain that decrypts
+    Granola's local credentials — which is why scheduled syncs work here but not via cron.
+    """
+    if sys.platform != "darwin":
+        print(json.dumps({"error": "LaunchAgents are macOS only."}), file=sys.stderr)
+        sys.exit(1)
+
+    label = args.label
+    # Label is used both as a filename and a launchctl service target, so reject
+    # path separators, whitespace, and anything that isn't a plain agent label.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", label or ""):
+        print(json.dumps({
+            "error": f"Invalid --label '{label}'.",
+            "hint": "Use letters, digits, dot, dash, underscore only "
+                    "(e.g. com.granola.sync).",
+        }), file=sys.stderr)
+        sys.exit(1)
+    plist_path = Path.home() / "Library/LaunchAgents" / f"{label}.plist"
+    uid = os.getuid()
+    domain = f"gui/{uid}"
+
+    def _say(msg: str) -> None:
+        if not args.quiet and not args.json:
+            print(msg)
+
+    # Uninstall mode
+    if args.uninstall:
+        subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
+                       capture_output=True, text=True)
+        existed = plist_path.exists()
+        if existed:
+            plist_path.unlink()
+        result = {"action": "uninstall", "label": label,
+                  "plist": str(plist_path), "removed": existed}
+        if args.json:
+            print(json.dumps(result))
+        else:
+            _say(f"Removed LaunchAgent '{label}'." if existed
+                 else f"No LaunchAgent '{label}' was installed.")
+        return
+
+    if args.interval <= 0:
+        print(json.dumps({"error": "--interval must be a positive number of seconds."}),
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve the interpreter: prefer the skill's venv, else this interpreter.
+    script = Path(__file__).resolve()
+    venv_python = script.parent.parent / ".venv/bin/python"
+    python = venv_python if venv_python.exists() else Path(sys.executable)
+
+    # Verify the chosen interpreter can actually run a sync — a venv that exists
+    # but was never `pip install`-ed would produce an agent that fails every run.
+    dep_check = subprocess.run([str(python), "-c", "import requests"],
+                               capture_output=True, text=True)
+    if dep_check.returncode != 0:
+        print(json.dumps({
+            "error": f"{python} cannot import 'requests'; scheduled syncs would fail.",
+            "hint": "Install dependencies for that interpreter "
+                    "(uv pip install -r requirements.txt) or set up the skill's .venv.",
+        }), file=sys.stderr)
+        sys.exit(1)
+
+    log = Path(args.log).expanduser() if args.log else (
+        Path.home() / "Library/Logs/granola-sync.log")
+    log.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build ProgramArguments: python script sync --quiet [--storage ...]
+    argv = [str(python), str(script), "sync", "--quiet"]
+    if args.storage:
+        argv += ["--storage", str(Path(args.storage).expanduser())]
+
+    # RunAtLoad drives the immediate sync (on bootstrap) and the on-login sync.
+    # --no-run disables it, so the first sync waits for the StartInterval tick.
+    plist = {
+        "Label": label,
+        "ProgramArguments": argv,
+        "RunAtLoad": not args.no_run,
+        "StartInterval": int(args.interval),
+        "StandardOutPath": str(log),
+        "StandardErrorPath": str(log),
+        "ProcessType": "Background",
+    }
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(plist_path, "wb") as f:
+        plistlib.dump(plist, f)
+    _say(f"Wrote {plist_path}")
+
+    if args.no_load:
+        if args.json:
+            print(json.dumps({"action": "write", "label": label,
+                              "plist": str(plist_path), "loaded": False}))
+        return
+
+    # Reload cleanly: bootout any prior copy (ignore errors), then bootstrap.
+    subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
+                   capture_output=True, text=True)
+    boot = subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)],
+                          capture_output=True, text=True)
+    if boot.returncode != 0:
+        err = boot.stderr.strip() or boot.stdout.strip()
+        print(json.dumps({"error": "launchctl bootstrap failed",
+                          "detail": err, "plist": str(plist_path)}),
+              file=sys.stderr)
+        sys.exit(1)
+    if args.no_run:
+        _say(f"Loaded '{label}' into {domain} (syncs every {int(args.interval)}s; "
+             f"no immediate run).")
+    else:
+        _say(f"Loaded '{label}' into {domain} — syncing now and on login, then every "
+             f"{int(args.interval)}s.\n  Check progress: tail -f {log}")
+
+    if args.json:
+        print(json.dumps({"action": "install", "label": label,
+                          "plist": str(plist_path), "loaded": True,
+                          "ran_now": not args.no_run,
+                          "python": str(python), "log": str(log),
+                          "interval": int(args.interval)}))
+
+
 # ============================================================================
 # CLI
 # ============================================================================
@@ -821,6 +945,24 @@ def main() -> None:
     search_p.add_argument("query", help="Search query (regex)")
     search_p.add_argument("--context", "-C", type=int, default=0, help="Context lines")
     search_p.set_defaults(func=cmd_search)
+
+    # install-launchagent (macOS) — schedule background syncs via launchd
+    la_p = subparsers.add_parser(
+        "install-launchagent", parents=[common],
+        help="Install a launchd LaunchAgent to sync automatically (macOS)")
+    la_p.add_argument("--label", default="com.granola.sync",
+                      help="LaunchAgent label (default: com.granola.sync)")
+    la_p.add_argument("--interval", type=int, default=10800,
+                      help="Seconds between syncs (default: 10800 = 3h)")
+    la_p.add_argument("--log", help="Log file path "
+                      "(default: ~/Library/Logs/granola-sync.log)")
+    la_p.add_argument("--no-load", action="store_true",
+                      help="Write the plist but don't load it")
+    la_p.add_argument("--no-run", action="store_true",
+                      help="Load but don't trigger an immediate sync")
+    la_p.add_argument("--uninstall", action="store_true",
+                      help="Unload and remove the LaunchAgent")
+    la_p.set_defaults(func=cmd_install_launchagent)
 
     args = parser.parse_args()
     try:

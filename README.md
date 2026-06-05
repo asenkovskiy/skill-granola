@@ -90,12 +90,20 @@ Meetings sync to `~/Documents/granola-meetings/` by default. Override with:
     notes.md         # AI-generated summary (if available)
 ```
 
-## Auto-Sync with Cron
+## Auto-Sync (macOS)
+
+Install a launchd LaunchAgent to sync in the background:
 
 ```bash
-# Sync every hour (add to crontab -e)
-0 * * * * ~/.claude/skills/granola/.venv/bin/python ~/.claude/skills/granola/scripts/granola.py sync --quiet
+~/.claude/skills/granola/.venv/bin/python ~/.claude/skills/granola/scripts/granola.py install-launchagent
 ```
+
+This syncs on login and every 3 hours, logging to `~/Library/Logs/granola-sync.log`.
+Use `--interval <seconds>` to change the cadence and `--uninstall` to remove it.
+
+> **Why not cron?** cron runs outside your login session, so it can't reach the
+> macOS Keychain that decrypts Granola's local credentials — scheduled cron syncs
+> fail to authenticate. The LaunchAgent runs in your login session, so auth works.
 
 ## Optional: Semantic Search with qmd
 
