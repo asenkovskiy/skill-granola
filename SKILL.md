@@ -22,15 +22,15 @@ Claude will use this skill when you mention:
 
 See the [README](README.md) for full installation instructions.
 
-1. **Create venv and install dependency:**
+1. **Create venv and install dependencies** (`requirements.txt` lists `requests` + `pycryptodome`):
    ```bash
    cd <skill-dir>
    uv venv && uv pip install -r requirements.txt
    ```
 
-2. **Sign into Granola app** — the CLI uses Granola's local auth tokens
+2. **Sign into Granola app** — the CLI needs a signed-in desktop app.
 
-3. **Sync meetings** (first time):
+3. **Authenticate the CLI** (see *Authentication* below), then **sync**:
    ```bash
    python <skill-dir>/scripts/granola.py sync
    ```
@@ -43,7 +43,30 @@ See the [README](README.md) for full installation instructions.
 
 ## Platform Support
 
-**macOS only** — authentication reads from `~/Library/Application Support/Granola/supabase.json`, which is created by the Granola desktop app.
+**macOS only.**
+
+## Authentication
+
+Granola 7.5x+ encrypts its local auth and keeps the key in a Keychain item only its
+own app can read, so the CLI can't read tokens from disk. Instead,
+`scripts/refresh_auth.py` captures a fresh token pair from the running app's own
+HTTPS traffic via a temporary local mitmproxy and writes a plaintext `supabase.json`
+that `granola.py` reads; `granola.py` then self-refreshes the access token.
+
+```bash
+python <skill-dir>/scripts/refresh_auth.py
+```
+
+Requires `uv` on PATH and the Granola app signed in. It restarts Granola and pops
+**one macOS password dialog** (to trust the mitmproxy CA) — approve it; the script
+removes the CA trust and disables the proxy again when it finishes.
+
+> **When to re-run:** if a sync fails with `"Granola auth is sealed"` or a token
+> refresh error. The access token lasts ~6h and self-refreshes, but the CLI and the
+> app share a rotating refresh token from separate stores, so they can eventually
+> desync — re-running `refresh_auth.py` re-syncs them. For a conflict-free, longer
+> -lived credential, use Granola's official public API key (`grn_…`, Business plan;
+> Settings → API) instead — not yet wired into this skill.
 
 ## Available Commands
 
@@ -67,11 +90,11 @@ granola.py sync --quiet                # Quiet mode for scheduled/automated sync
 
 ### Scheduling automatic syncs (macOS)
 
-To keep meetings synced in the background, install a **launchd LaunchAgent**. On
-macOS this is the scheduler that works for this skill: it runs inside your login
-session, so it can reach the Keychain that Granola uses to encrypt its local
-credentials. (Plain `cron` runs without that session and can't decrypt them, so
-scheduled cron syncs fail to authenticate — use launchd instead.)
+To keep meetings synced in the background, install a **launchd LaunchAgent**. It
+runs inside your login session and syncs on login + every few hours, which keeps
+the CLI's access token refreshed (the token self-refreshes for as long as syncs
+run regularly; let it idle too long and you'll need to re-run `refresh_auth.py` —
+see *Authentication*).
 
 The CLI installs and loads the agent for you:
 
@@ -81,8 +104,7 @@ granola.py install-launchagent          # write, load, and run one sync now
 
 This syncs on login and every 3 hours, logging to
 `~/Library/Logs/granola-sync.log`. launchd runs any sync missed during
-sleep/logout once on wake. The agent only runs while you're **logged in** —
-that's what gives it Keychain access.
+sleep/logout once on wake.
 
 Options:
 
@@ -170,7 +192,7 @@ bun install -g qmd
 ```
 Then set up the index:
 ```bash
-qmd collection add ~/Documents/granola-meetings --name granola-meetings
+qmd collection add ~/Documents/granola-meetings --name transcripts
 qmd embed
 ```
 This is a one-time setup. After syncing new meetings, re-run `qmd embed` to update the index.
@@ -181,13 +203,13 @@ This is a one-time setup. After syncing new meetings, re-run `qmd embed` to upda
 
 ### How to search with qmd
 ```bash
-qmd search "what did we decide about pricing?" --json -n 10 -c granola-meetings
+qmd search "what did we decide about pricing?" --json -n 10 -c transcripts
 ```
 
-The `--json` flag returns structured results. Use `-n` to control result count and `-c granola-meetings` to scope to the meetings collection.
+The `--json` flag returns structured results. Use `-n` to control result count and `-c transcripts` to scope to the meetings collection.
 
 ### Combined workflow
-1. Use `qmd search "topic" --json -c granola-meetings` to find relevant meetings
+1. Use `qmd search "topic" --json -c transcripts` to find relevant meetings
 2. Extract the meeting folder name from the results
 3. Use `granola.py show MEETING_ID --transcript --pretty` to get full details
 

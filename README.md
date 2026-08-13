@@ -101,9 +101,8 @@ Install a launchd LaunchAgent to sync in the background:
 This syncs on login and every 3 hours, logging to `~/Library/Logs/granola-sync.log`.
 Use `--interval <seconds>` to change the cadence and `--uninstall` to remove it.
 
-> **Why not cron?** cron runs outside your login session, so it can't reach the
-> macOS Keychain that decrypts Granola's local credentials — scheduled cron syncs
-> fail to authenticate. The LaunchAgent runs in your login session, so auth works.
+Running it regularly also keeps the CLI's access token fresh (it self-refreshes as
+long as syncs happen). If it idles too long, re-run `scripts/refresh_auth.py`.
 
 ## Optional: Semantic Search with qmd
 
@@ -113,15 +112,22 @@ See [docs/qmd-integration.md](docs/qmd-integration.md) for setup instructions.
 
 ## How Auth Works
 
-The skill reads authentication tokens from `~/Library/Application Support/Granola/supabase.json`, which the Granola desktop app creates when you sign in. If a token is expired, the skill automatically attempts to refresh it using the stored refresh token. As a fallback, it also tries `stored-accounts.json`. No API keys or manual token management needed — just keep the Granola desktop app installed.
+Granola 7.5x+ encrypts its local auth and holds the key in a Keychain item only its
+own app can read, so the CLI can't read tokens from disk. Run `scripts/refresh_auth.py`
+once — it captures a fresh token pair from the running app's own HTTPS traffic through
+a temporary local mitmproxy and writes a plaintext `supabase.json` the CLI reads. After
+that the CLI self-refreshes the access token. Re-run it if a sync fails with
+`"Granola auth is sealed"` (the app and CLI share a rotating refresh token and can
+drift apart over time). Requires `uv` and the signed-in Granola app; it pops one macOS
+password dialog to trust the mitmproxy CA, then removes that trust when done.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| "Auth file not found" | Sign into the Granola desktop app |
-| "Token expired and refresh failed" | Open Granola to re-authenticate |
-| "requests module not found" | Run `uv pip install requests` in the skill's venv |
+| "Granola auth is sealed" | Run `scripts/refresh_auth.py` (see *How Auth Works*) |
+| "Token expired and refresh failed" | Re-run `scripts/refresh_auth.py` |
+| "requests module not found" | Run `uv pip install -r requirements.txt` in the skill's venv |
 | Empty search results | Run `sync` first to download meetings |
 
 ## License

@@ -183,8 +183,22 @@ def get_token() -> str:
 
     if data is None:
         if not SUPABASE_PATH.exists():
-            hint = "Make sure Granola (https://granola.ai) is installed and you're signed in."
-            err: dict = {"error": "Auth file not found", "path": str(SUPABASE_PATH), "hint": hint}
+            # Granola 7.5x+ seals auth: supabase.json.enc is decryptable only with a
+            # DEK held in an entitlement-protected Keychain item this CLI cannot read
+            # (the plaintext supabase.json and the storage.dek file are both gone).
+            # Re-seed the plaintext file by capturing tokens from the app's traffic.
+            enc_sealed = SUPABASE_ENC_PATH.exists()
+            hint = (
+                "Run `python3 refresh_auth.py` (same folder) to re-capture tokens "
+                "from the running Granola app."
+                if enc_sealed
+                else "Make sure Granola (https://granola.ai) is installed and you're signed in."
+            )
+            err: dict = {
+                "error": "Granola auth is sealed" if enc_sealed else "Auth file not found",
+                "path": str(SUPABASE_PATH),
+                "hint": hint,
+            }
             if enc_error:
                 err["encrypted_auth_error"] = str(enc_error)
             print(json.dumps(err), file=sys.stderr)
